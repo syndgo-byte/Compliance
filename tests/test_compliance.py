@@ -304,3 +304,35 @@ def test_one_shot_events_kept_until_delivered(tmp_path):
     assert r2["sent"] == 1 and len(hub.posted) == 1 and r2["pending_alerts"] == []
     r3 = run_cycle(hub=hub.client(), watch=later, notify=True, **kw)
     assert r3["new_alerts"] == [] and len(hub.posted) == 1
+
+
+def test_security_cli_scans_then_reads(tmp_path):
+    """security 를 상주시키지 않고 한 바퀴마다 scan → list --json · targets 를 부른다."""
+    from types import SimpleNamespace
+    from ops_compliance.security import SecurityCLI
+    calls = []
+    rows = [{"service": "a", "rule": "HARD-BIND-ALL", "severity": "medium", "status": "open"},
+            {"service": "a", "rule": "X", "severity": "low", "status": "dismissed"}]
+
+    def run(cmd, **kw):
+        calls.append(cmd[3:])
+        out = {"scan": "", "list": json.dumps(rows), "targets": json.dumps({"code": {"a": "D:/a"}, "web": {}})}
+        return SimpleNamespace(returncode=0, stdout=out[cmd[3]], stderr="")
+    c = SecurityCLI(home=tmp_path, run=run)
+    assert c.active_findings() == {"a": [rows[0]]} and c.code_targets() == {"a"}
+    c.active_findings()
+    assert calls == [["scan"], ["list", "--json"], ["targets"], ["list", "--json"]]     # scan 은 한 번만
+
+
+def test_security_cli_scan_failure_still_judges(tmp_path):
+    from types import SimpleNamespace
+    from ops_compliance.security import SecurityCLI
+
+    def run(cmd, **kw):
+        if cmd[3] == "scan":
+            return SimpleNamespace(returncode=1, stdout="", stderr="OSV 연결 실패")
+        return SimpleNamespace(returncode=0, stdout=json.dumps([] if cmd[3] == "list" else {"code": {}}), stderr="")
+    svcs = [ServiceInfo("a", str(tmp_path))]
+    r = run_cycle(hub=FakeHub({}).client(), services=svcs, watch=lambda profiles: {},
+                  security=SecurityCLI(home=tmp_path, run=run), home=tmp_path, notify=False)
+    assert any("보안 진단 실패" in e and "OSV" in e for e in r["law"]["errors"])

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .clauses import evaluate
 from .hub import PROFILE_FILE, HubClient, HubError, ServiceInfo
-from .security import SecurityClient, SecurityError
+from .security import SecurityCLI, SecurityClient, SecurityError
 
 HOME = Path(__file__).resolve().parent.parent
 SELF = "compliance"          # 허브에 등록된 이 관리 서비스의 id
@@ -116,10 +116,10 @@ def _alerts(report: dict) -> list[dict]:
 def run_cycle(*, hub: HubClient | None = None, services: list[ServiceInfo] | None = None, watch=None,
               security: SecurityClient | None = None, home: Path = HOME, notify: bool = True) -> dict:
     """services 를 주면 허브 목록 대신 사용. watch 는 privacy_law.watch.run 대체(테스트).
-    security 는 ops/security 결과 읽기(기본 127.0.0.1:8200). 꺼져 있으면 보안 항목만 '결과 없음'."""
+    security 는 ops/security 결과 읽기(기본 SecurityCLI: 이번 바퀴에 진단을 직접 돌림). 실패하면 보안 항목만 '결과 없음'."""
     home = Path(home)
     hub = hub or HubClient()
-    security = security or SecurityClient()
+    security = security or SecurityCLI()
     errors = []
     if services is None:
         try:
@@ -151,6 +151,8 @@ def run_cycle(*, hub: HubClient | None = None, services: list[ServiceInfo] | Non
     try:
         sec, sec_err = security.active_findings(), None
         sec_targets = security.code_targets()
+        if getattr(security, "scan_error", None):
+            law["errors"].append(f"보안 진단 실패 — 지난 진단 결과로 판정: {security.scan_error}")
     except SecurityError as e:
         sec, sec_err, sec_targets = None, str(e), set()
         law["errors"].append(sec_err)
