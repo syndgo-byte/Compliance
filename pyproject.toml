@@ -1,0 +1,5 @@
+[project]
+name = "ops_compliance"
+version = "0.1.0"
+description = "개인정보 · 컴플라이언스"
+requires-python = ">=3.10"
