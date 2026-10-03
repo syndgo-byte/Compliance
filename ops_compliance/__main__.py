@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from .checker import HOME, load_profile, run_cycle, summary
-from .hub import HubClient
+from .hub import DEFAULT_HUB_URL, HubClient
 
 TASK = "MCPHub_ops_compliance"
 EVERY_HOURS = 12
@@ -45,7 +45,7 @@ def _schedule(action: str, every: int) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="ops_compliance")
-    ap.add_argument("--hub", default="http://127.0.0.1:8000")
+    ap.add_argument("--hub", default=DEFAULT_HUB_URL)
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("run")
     s.add_argument("--no-notify", action="store_true", help="허브 알림을 보내지 않음")

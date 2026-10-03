@@ -40,16 +40,20 @@ def load_profile(svc: ServiceInfo):
     return prof, "연결", str(p)
 
 
-def load_scope(home: Path = HOME) -> dict[str, list[str]]:
-    """scope.json: 서비스별로 추가 적용할 법령 (opt-in). 예: {"EMSv3": ["전자금융감독규정"]}"""
+def load_scope(home: Path = HOME) -> dict[str, dict[str, bool]]:
+    """scope.json: 서비스별 특징 기반 법령 선택. 예: {"EMSv3": {"판매": true, "직접결제": true, ...}}
+
+    반환: {서비스ID: {특징: true/false, ...}} 형태. 특징 → laws_for() 가 법령 자동 선택.
+    """
     p = Path(home) / "scope.json"
     if not p.exists():
         return {}
     data = json.loads(p.read_text(encoding="utf-8"))
-    from .clauses import LAWS
-    bad = [law for laws in data.values() for law in laws if law not in LAWS]
-    if bad:
-        raise ValueError(f"scope.json 에 모르는 법령: {bad} (가능: {list(LAWS)})")
+    # 형식 확인: list(옛 형식)면 경고
+    for sid, v in data.items():
+        if isinstance(v, list):
+            raise ValueError(f"{sid}: scope.json 형식이 옛 버전입니다. 특징 기반으로 변경 필요: "
+                           "{\"판매\": true/false, \"위치\": ..., \"직접결제\": ..., \"공공\": ...}")
     return data
 
 
@@ -120,12 +124,12 @@ def run_cycle(*, hub: HubClient | None = None, services: list[ServiceInfo] | Non
     home = Path(home)
     hub = hub or HubClient()
     security = security or SecurityCLI()
-    errors = []
+    warnings = []
     if services is None:
         try:
             services = hub.services()
         except HubError as e:
-            errors.append(str(e))
+            warnings.append(str(e))
             services = []
     if watch is None:
         from privacy_law.watch import run as watch
@@ -141,7 +145,6 @@ def run_cycle(*, hub: HubClient | None = None, services: list[ServiceInfo] | Non
         law.setdefault(k, [])
     for k in ("findings", "case_gaps", "benchmark_gaps", "violations"):
         law.setdefault(k, {})
-    law["errors"] = errors + law["errors"]
 
     try:
         scope = load_scope(home)
@@ -173,11 +176,15 @@ def run_cycle(*, hub: HubClient | None = None, services: list[ServiceInfo] | Non
             entry["security"] = {"available": False, "untracked": True,
                                  "detail": "ops/security targets.json 에 없음 — 코드 보안 진단을 안 함"}
         else:
-            entry["security"] = {"available": True, **evaluate(sec.get(s.id, []), scope.get(s.id))}
+            from .clauses import laws_for
+            features = scope.get(s.id, {})
+            opted = laws_for(features)  # 특징 → 적용 법령 리스트
+            entry["security"] = {"available": True, **evaluate(sec.get(s.id, []), opted)}
         svcs[s.id] = entry
 
     report = {"checked_at": datetime.now().isoformat(timespec="seconds"), "services": svcs,
               "law": {k: v for k, v in law.items() if k not in ("findings", "case_gaps", "benchmark_gaps")},
+              "warnings": warnings,
               "shared": {"findings": law["findings"].get("(공용 문구)", {}),
                          "case_gaps": law["case_gaps"].get("(공용 문구)", [])}}
 
@@ -194,9 +201,22 @@ def run_cycle(*, hub: HubClient | None = None, services: list[ServiceInfo] | Non
     alerts += [a for a in prev.get("pending_alerts", []) if a["key"] not in keys]
     report["new_alerts"] = [a for a in alerts if a["key"] not in seen]
     delivered = set()
+    delivery_errors = []
     if notify:
-        delivered = {a["key"] for a in report["new_alerts"]
-                     if hub.report(a["service"], a["event_type"], a["severity"], a["message"])}
+        for a in report["new_alerts"]:
+            try:
+                sent = hub.report(a["service"], a["event_type"], a["severity"], a["message"])
+            except Exception as e:
+                sent = False
+                detail = f"허브 알림 전송 실패: {e}"
+            else:
+                detail = getattr(hub, "last_error", None) or "허브 알림 전송 실패"
+            if sent:
+                delivered.add(a["key"])
+            else:
+                delivery_errors.append(detail)
+    if delivery_errors:
+        warnings.append(f"허브 알림 {len(delivery_errors)}건 전송 실패: {delivery_errors[0]}")
     report["sent"] = len(delivered)
     report["alert_keys"] = sorted({a["key"] for a in alerts} & (seen | delivered))
     report["pending_alerts"] = [a for a in alerts if a["key"].startswith(ONE_SHOT)
@@ -234,5 +254,6 @@ def summary(report: dict) -> dict:
                               "security": _sec_summary(s.get("security") or {})}
                      for sid, s in report["services"].items()},
         "shared_text": report["shared"]["findings"].get("summary", {}),
-        "errors": law["errors"], "new_alerts": len(report["new_alerts"]), "sent": report["sent"],
+        "errors": law["errors"], "warnings": report.get("warnings", []),
+        "new_alerts": len(report["new_alerts"]), "sent": report["sent"],
     }

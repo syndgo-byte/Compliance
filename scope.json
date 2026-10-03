@@ -1,0 +1,8 @@
+{
+  "EMSv3": {
+    "sales": true,
+    "location": false,
+    "direct_payment": true,
+    "public": false
+  }
+}

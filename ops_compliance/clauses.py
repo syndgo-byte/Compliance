@@ -15,12 +15,15 @@ from __future__ import annotations
 SAFETY = "개인정보의 안전성 확보조치 기준"
 ICT = "정보보호조치에 관한 지침"
 EFIN = "전자금융감독규정"
+ECOMMERCE = "전자상거래 등에서의 소비자보호에 관한 법률"
 
-# applies: 누구에게 적용되나. "all" 은 모든 서비스, 그 외는 scope.json 에 서비스별로 켜야 평가한다.
+# applies: 누구에게 적용되나. "all" 은 모든 서비스, "feature" 는 특징 기반으로 판단.
+# features: 적용 판단 기준 (sales·location·direct_payment·public). scope.json 에서 true 면 포함.
 LAWS = {
-    SAFETY: {"applies": "all", "basis": "개인정보처리자 전부 (개인정보 보호법 제29조)"},
-    ICT: {"applies": "all", "basis": "정보통신서비스 제공자 (정보통신망법 제45조③) — 웹 서비스는 해당"},
-    EFIN: {"applies": "opt-in", "basis": "금융회사 · 전자금융업자만. PG 결제창만 붙인 가맹점은 대상 아님"},
+    SAFETY: {"applies": "all", "features": [], "basis": "개인정보처리자 전부 (개인정보 보호법 제29조)"},
+    ICT: {"applies": "all", "features": [], "basis": "정보통신서비스 제공자 (정보통신망법 제45조③) — 웹 서비스는 해당"},
+    EFIN: {"applies": "feature", "features": ["direct_payment"], "basis": "금융회사 · 전자금융업자 · 직접 결제 처리"},
+    ECOMMERCE: {"applies": "feature", "features": ["sales"], "basis": "온라인 판매·구독 서비스 제공자"},
 }
 
 CLAUSES: list[dict] = [
@@ -69,7 +72,7 @@ CLAUSES: list[dict] = [
      "rules": ["SECRET-HARDCODED", "SECRET-AI-KEY", "SECRET-AWS-KEY", "SECRET-GITHUB-TOKEN", "SECRET-GOOGLE-KEY",
                "SECRET-PRIVATE-KEY", "SECRET-SLACK-TOKEN", "CONFIG-LOG-SECRET"]},
 
-    # ── 전자금융감독규정 (opt-in)
+    # ── 전자금융감독규정 (feature: direct_payment)
     {"law": EFIN, "article": "제13조①9호", "title": "정보처리시스템 가동기록 자동 기록·1년 이상 보존",
      "rules": ["LEGAL-LOG-NO-ACCESS-LOG", "LEGAL-LOG-RETENTION"]},
     {"law": EFIN, "article": "제15조①2호", "title": "긴급·중요 보정(patch) 즉시 적용",
@@ -82,21 +85,43 @@ CLAUSES: list[dict] = [
      "rules": ["LEGAL-PASSWORD-PLAIN", "LEGAL-PASSWORD-FAST-HASH", "SAST-PY-WEAK-HASH"]},
     {"law": EFIN, "article": "제34조의3②1·2호", "title": "유추 어려운 비밀번호 규칙, 입력 오류 횟수 초과 시 즉시 중지",
      "rules": ["LEGAL-PASSWORD-MINLEN", "LEGAL-NO-LOGIN-LOCKOUT"]},
+
+    # ── 전자상거래 등에서의 소비자보호에 관한 법률 (feature: sales)
+    {"law": ECOMMERCE, "article": "제13조", "title": "결제 정보 암호화 전송·저장",
+     "rules": ["WEB-NO-HTTPS", "WEB-TLS-INVALID", "WEB-TLS-EXPIRY", "SECRET-HARDCODED"]},
+    {"law": ECOMMERCE, "article": "제21조의2", "title": "구독 계약의 자동 갱신 명확한 고지 및 쉬운 해제",
+     "rules": []},  # 법적 요건이지 코드 규칙으로는 보기 어려움
 ]
 
 _SEV = ["critical", "high", "medium", "low"]
 _KEYS = ("id", "rule", "severity", "title", "file", "line")
 
 
-def laws_for(opted: list[str] | None) -> list[str]:
-    """이 서비스에 평가할 법령. applies=all 은 항상, opt-in 은 scope 에 있을 때만."""
-    opted = set(opted or [])
-    return [name for name, m in LAWS.items() if m["applies"] == "all" or name in opted]
+def laws_for(features: dict[str, bool] | list[str] | None = None) -> list[str]:
+    """이 서비스에 평가할 법령.
+
+    applies=all 은 항상. applies=feature 는 features 에서 일치하면 포함.
+    features: dict 면 특징 기반 선택 ({"판매": true, ...}). list 면 opt-in 법령명 리스트(하위호환).
+    """
+    if isinstance(features, list):
+        # 하위호환: list 는 opt-in 법령 리스트
+        opted = set(features)
+        return [name for name, m in LAWS.items() if m["applies"] == "all" or (m["applies"] == "feature" and name in opted)]
+
+    features = features or {}
+    result = [name for name, m in LAWS.items() if m["applies"] == "all"]
+    for name, m in LAWS.items():
+        if m["applies"] == "feature" and any(features.get(f) for f in m.get("features", [])):
+            result.append(name)
+    return result
 
 
-def evaluate(findings: list[dict], opted: list[str] | None = None) -> dict:
+def evaluate(findings: list[dict], opted: list[str] | dict[str, bool] | None = None) -> dict:
     """한 서비스의 열린 security findings → 조항별 결과 + 어느 조항에도 안 붙은 규칙.
 
+    opted: list[str] 는 opt-in 법령 이름 리스트(하위호환).
+           dict[str, bool] 는 특징 기반 선택 {"판매": true, "위치": false, ...}.
+           None 이면 applies=all 법령만 적용.
     status: '미흡'(규칙에 걸린 항목 있음) | '신호 없음'(알려진 위반 신호 없음 — 충족 증명 아님)
     한 규칙이 여러 법령 조항에 걸릴 수 있다(예: 비밀번호 해시 → 안전성 기준 제7조① · 지침 2.2.13).
     """

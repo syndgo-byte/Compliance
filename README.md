@@ -1,6 +1,6 @@
 # 개인정보 · 컴플라이언스 (ops_compliance)
 
-마지막 업데이트: 2026-10-01 05:00
+마지막 업데이트: 2026-10-02 23:07
 
 12시간마다 법령 · 개인정보위 · 외부 처리방침 감시(Privacy_Law)와 ops/security 진단 결과를 모아
 **서비스별로 어느 법 조항이 미흡한지** 판정하고, 새로 생긴 것만 MCP Hub 관제판에 알린다.
@@ -23,13 +23,17 @@ compliance 는 security 에 판정 결과를 보내지 않는다. 진단 실패 
 
 - 개인정보의 안전성 확보조치 기준 (개인정보위 고시) — 모든 서비스
 - 정보보호조치에 관한 지침 [별표 1] (과기정통부 고시) — 모든 웹 서비스 (정보통신망법 제45조③)
-- 전자금융감독규정 (금융위 고시) — **opt-in**. 금융회사 · 전자금융업자만. `scope.json` 에서 켠다:
+- 전자금융감독규정 (금융위 고시) — **특징 기반**. 금융회사 · 전자금융업자 · 직접 결제 처리 시 `scope.json` 에서 켠다:
+- 전자상거래 등에서의 소비자보호에 관한 법률 — **특징 기반**. 온라인 판매·구독 서비스 제공 시 켠다.
 
 ```json
-{"<서비스ID>": ["전자금융감독규정"]}
+{"<서비스ID>": {"sales": true/false, "location": true/false, "direct_payment": true/false, "public": true/false}}
 ```
 
-EMSv3 는 웹 서비스만 해서 전자금융업자가 아니므로 켜지 않는다(scope.json 없음).
+EMSv3 는 전자상거래(판매)와 직접 결제를 하므로:
+```json
+{"EMSv3": {"sales": true, "direct_payment": true, "location": false, "public": false}}
+```
 
 조항마다 security 규칙 ID 를 연결했다. 결과는 `미흡`(규칙에 걸림) 또는 `신호 없음`.
 **신호 없음은 충족 증명이 아니다.** 조직 · 절차 · 물리 조치(내부 관리계획, 교육, 출입통제)는 코드로 볼 수 없어 표에 없다.
@@ -57,7 +61,7 @@ python -m ops_compliance schedule install|remove|status   # Windows 작업 스�
 
 **운영은 작업 스케줄러로만 한다** — 12시간마다 한 바퀴 돌고 끝난다. 상주 프로세스 없음.
 
-필요: Privacy_Law 가 import 가능해야 함, ops/security 폴더, 허브(8000, 알림 전달용 — 꺼져 있으면 다음 바퀴에 다시 보냄).
+필요: Privacy_Law 가 import 가능해야 함, ops/security 폴더, 허브(기본 127.0.0.1:8100, 알림 전달용 — 꺼져 있으면 다음 바퀴에 다시 보냄). 허브 주소가 다르면 `MCP_HUB_URL` 환경 변수 또는 `--hub URL` 로 지정한다.
 법령은 법제처 웹 화면(law.go.kr)에서 최신본을 읽는다 — 인증키(LAW_OC) 필요 없음. 저장돼 있으면 Open API 사용.
 
 테스트: `PYTHONPATH=".;D:/Vibe_coding/modules/Privacy_Law" python -m pytest tests -q`

@@ -1,11 +1,12 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from ops_compliance.checker import load_profile, run_cycle, summary
-from ops_compliance.hub import HubClient, HubError, ServiceInfo
-from ops_compliance.clauses import CLAUSES, evaluate
+from ops_compliance.hub import DEFAULT_HUB_URL, HubClient, HubError, ServiceInfo
+from ops_compliance.clauses import CLAUSES, ECOMMERCE, EFIN, evaluate, laws_for
 from ops_compliance.rollout import rollout_status
 from ops_compliance.security import SecurityClient, SecurityError
 from privacy_law import DEFAULT_DIR
@@ -92,8 +93,20 @@ def test_hub_services_only_web_services(tmp_path):
 def test_hub_down_is_hub_error():
     def boom(url):
         raise OSError("refused")
-    with pytest.raises(HubError):
+    with pytest.raises(HubError, match="GET .*/hub/graph"):
         HubClient(get=boom).services()
+
+
+def test_hub_default_and_post_failure_detail():
+    assert DEFAULT_HUB_URL == os.getenv("MCP_HUB_URL", "http://127.0.0.1:9890")
+
+    def down(url):
+        raise OSError("refused")
+
+    hub = HubClient(post=down)
+    assert hub.report("shop", "change", "high", "test") is False
+    assert f"POST {DEFAULT_HUB_URL}/monitor/events/shop" in hub.last_error
+    assert "refused" in hub.last_error
 
 
 def test_profile_statuses(tmp_path):
@@ -131,7 +144,7 @@ def test_cycle_reports_and_sends_only_new_alerts(tmp_path):
     assert sum("/monitor/events/shop?" in u and "severity=high" in u for u in hub.posted) == 1
     assert (home / "reports" / "latest.json").exists()
     sm = summary(r)
-    assert sm["services"]["shop"] == {"status": "연결", "error": 1, "warn": 0, "case_gaps": 1, "security": {"미흡": [], "적용 제외": ["전자금융감독규정"], "조항 없는 규칙": []}}
+    assert sm["services"]["shop"] == {"status": "연결", "error": 1, "warn": 0, "case_gaps": 1, "security": {"미흡": [], "적용 제외": ["전자금융감독규정", "전자상거래 등에서의 소비자보호에 관한 법률"], "조항 없는 규칙": []}}
 
     # 두 번째 바퀴: 같은 결과면 알림 없음
     r2 = run_cycle(hub=hub.client(), watch=watch, home=home, security=NOSEC)
@@ -154,9 +167,11 @@ def test_cycle_survives_hub_down_and_watch_crash(tmp_path):
         raise RuntimeError("법제처 응답 없음")
     r = run_cycle(hub=HubClient(get=boom, post=boom), watch=crash, home=tmp_path, security=FakeSec(down=True))
     errs = r["law"]["errors"]
-    assert any("허브" in e for e in errs) and any("법제처 응답 없음" in e for e in errs)
+    assert any("허브" in e for e in r["warnings"]) and any("법제처 응답 없음" in e for e in errs)
     assert any("security 꺼짐" in e for e in errs)
     assert r["services"] == {} and r["sent"] == 0      # 보낼 곳도 죽어 있으면 0
+    assert (tmp_path / "reports" / "latest.json").exists()
+    assert summary(r)["warnings"] == r["warnings"]
 
 
 def test_no_notify(tmp_path):
@@ -176,6 +191,8 @@ def test_failed_delivery_retried(tmp_path):
     flaky = HubClient("http://127.0.0.1:8000", get=hub.get, post=down)
     r = run_cycle(hub=flaky, watch=_watch(LAW), home=tmp_path, security=NOSEC)
     assert r["new_alerts"] and r["sent"] == 0 and r["alert_keys"] == []
+    assert any("POST http://127.0.0.1:8000/monitor/events/demo" in w for w in r["warnings"])
+    assert json.loads((tmp_path / "reports" / "latest.json").read_text(encoding="utf-8"))["warnings"] == r["warnings"]
     r = run_cycle(hub=hub.client(), watch=_watch(LAW), home=tmp_path, security=NOSEC)
     assert r["sent"] == 1 and "svc:demo:unlinked" in r["alert_keys"]
 
@@ -215,12 +232,48 @@ def test_efin_opt_in_via_scope(tmp_path):
     assert by["제34조의3②1·2호"]["status"] == "미흡"
     hub = FakeHub({"pay": {"provides": []}})
     sec = FakeSec({"pay": [dict(rows[0], status="open")]})
-    (tmp_path / "scope.json").write_text(json.dumps({"pay": ["전자금융감독규정"]}, ensure_ascii=False), encoding="utf-8")
+    # 특징 기반 scope: direct_payment=true면 전자금융감독규정 적용
+    (tmp_path / "scope.json").write_text(json.dumps({"pay": {"direct_payment": True}}, ensure_ascii=False), encoding="utf-8")
     r = run_cycle(hub=hub.client(), watch=_watch(LAW), home=tmp_path, security=sec, notify=False)
     assert any("제34조의3" in a["message"] for a in r["new_alerts"])
-    (tmp_path / "scope.json").write_text(json.dumps({"pay": ["없는법"]}), encoding="utf-8")
+    # 옛 형식(list)은 오류 발생
+    (tmp_path / "scope.json").write_text(json.dumps({"pay": ["전자금융감독규정"]}), encoding="utf-8")
     r = run_cycle(hub=hub.client(), watch=_watch(LAW), home=tmp_path, security=sec, notify=False)
     assert any("scope.json" in e for e in r["law"]["errors"])
+
+
+@pytest.mark.parametrize(
+    ("features", "expected"),
+    [({}, set()),
+     ({"sales": True, "direct_payment": False}, {ECOMMERCE}),
+     ({"sales": False, "direct_payment": True}, {EFIN}),
+     ({"sales": True, "direct_payment": True}, {ECOMMERCE, EFIN}),
+     ({"sales": False, "direct_payment": False, "location": True, "public": True}, set())],
+)
+def test_laws_for_features(features, expected):
+    selected = set(laws_for(features))
+    assert selected & {ECOMMERCE, EFIN} == expected
+
+
+def test_sales_scope_applies_only_to_selected_service(tmp_path):
+    finding = {"id": "1", "rule": "WEB-NO-HTTPS", "severity": "high", "title": "t",
+               "file": "a.py", "line": 1, "status": "open"}
+    hub = FakeHub({"shop": {"provides": []}, "info": {"provides": []}})
+    sec = FakeSec({"shop": [finding], "info": [finding]})
+    (tmp_path / "scope.json").write_text(
+        json.dumps({"shop": {"sales": True}, "info": {"sales": False}}), encoding="utf-8")
+
+    report = run_cycle(hub=hub.client(), watch=_watch(LAW), home=tmp_path,
+                       security=sec, notify=False)
+    shop = report["services"]["shop"]["security"]
+    info = report["services"]["info"]["security"]
+    assert ECOMMERCE in shop["laws"] and ECOMMERCE not in shop["skipped"]
+    assert ECOMMERCE not in info["laws"] and ECOMMERCE in info["skipped"]
+    assert EFIN in shop["skipped"] and EFIN in info["skipped"]
+    assert [(c["article"], c["count"]) for c in shop["clauses"]
+            if c["law"] == ECOMMERCE] == [("제13조", 1), ("제21조의2", 0)]
+    assert any(a["key"] == f"svc:shop:sec:{ECOMMERCE}:제13조" for a in report["new_alerts"])
+    assert not any(a["key"].startswith(f"svc:info:sec:{ECOMMERCE}:") for a in report["new_alerts"])
 
 
 def test_security_client_filters_active():
