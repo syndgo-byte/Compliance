@@ -3,6 +3,12 @@
     "sales": true,
     "location": false,
     "direct_payment": true,
+    "public": true
+  },
+  "funeral": {
+    "sales": true,
+    "location": false,
+    "direct_payment": true,
     "public": false
   }
 }
